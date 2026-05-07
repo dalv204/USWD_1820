@@ -10,15 +10,28 @@ import matplotlib.pyplot as plt
 import serial
 import struct
 
+from scipy import signal
+
+
+
+
 
 # get the correct structure down!
 # start byte: 0x7E
 # end byte: 0x7F
 START_byte1 = b'\xcd'
 START_byte2 = b'\xab'
-I2S_SAMPLE_RATE = 20000
+I2S_SAMPLE_RATE = 40000
 # END = 0x7F
 # MAX_LEN = 256
+
+# filter definitions for improving hardware signal
+fs = I2S_SAMPLE_RATE
+low = 70
+high = 19000
+# b,a = signal.butter(4, Wn=[low, high], btype='bandpass', fs=fs, output='ba')
+b,a = signal.iirnotch(60.0, 30.0, fs)
+
 
 # # a few command types that we can use
 # ADC_STREAMING = 0x01
@@ -34,7 +47,7 @@ RED = Fore.RED + Style.BRIGHT
 RESET = Style.RESET_ALL
 
 ser = serial.Serial('COM3', 921600, timeout=1)
-time.sleep(1)
+time.sleep(.5)
 sample_count = 1024
 packet_size = sample_count * 2 # 2 bytes per sample
 
@@ -75,22 +88,44 @@ def read_packet(duration_sec):
                 all_data.extend(chunk)
     
     return np.array(all_data)
-data = read_packet(3)
+data = read_packet(10)
 np.save('hydrophone_test_run.npy', data)
 ser.close()
 print("serial should be closed!")
 
 
-time.sleep(1)
+time.sleep(.01)
 
 data = np.load('hydrophone_test_run.npy')
+data = data-np.mean(data) # subtracting the offset should make the math cleaner?
 
-fs = 20000
+fs = I2S_SAMPLE_RATE
 time = np.linspace(0, len(data)/fs, num=len(data))
+
+window_size = 500
+
+moving_avg = np.convolve(data, np.ones(window_size)/window_size, mode='same')
+filtered_data = signal.filtfilt(b,a,data)
+
+# doing a moving average makes us unable to see scratches
 
 # plot
 plt.plot(time,data)
+# plt.plot(time, filtered_data)
+# plt.plot(time, data-moving_avg)
 plt.show()
+
+
+
+
+
+
+
+
+
+
+
+
     
     # raw_len = read_exact(2)
     # length = struct.unpack("<H", raw_len)[0]
@@ -119,20 +154,20 @@ plt.show()
     
     # return payload
 
-def decode_adc_packet(payload):
-    """
-    extract the data and change it from little endian into correct format
-    return the data and which channel it came from
+# def decode_adc_packet(payload):
+#     """
+#     extract the data and change it from little endian into correct format
+#     return the data and which channel it came from
     
-    :param payload: the received message
-    """
-    # things to actually read what we're getting
-    pkt_type = payload[0]
-    ch = payload[1]
-    samples=[]
-    for i in range(2, len(payload), 2):
-        samples.append(payload[i] | (payload[i+1]<<8))
-    return ch, samples
+#     :param payload: the received message
+#     """
+#     # things to actually read what we're getting
+#     pkt_type = payload[0]
+#     ch = payload[1]
+#     samples=[]
+#     for i in range(2, len(payload), 2):
+#         samples.append(payload[i] | (payload[i+1]<<8))
+#     return ch, samples
 
 
 
