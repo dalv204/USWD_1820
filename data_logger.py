@@ -11,22 +11,30 @@ import serial
 import struct
 
 from scipy import signal
+from scipy.ndimage import gaussian_filter1d
+from scipy.signal import savgol_filter, medfilt
+
+ser = serial.Serial('COM3', 921600, timeout=1)
+time.sleep(.5)
 
 
-
-
-
-# get the correct structure down!
-# start byte: 0x7E
-# end byte: 0x7F
-START_byte1 = b'\xcd'
+START_byte1 = b'\xaa'
 START_byte2 = b'\xab'
-I2S_SAMPLE_RATE = 40000
-# END = 0x7F
-# MAX_LEN = 256
+END_byte1 = b'\x00'
+SAMPLE_RATE = 80000
+BUF_LEN = 50 # 50 pairs
+
+packet_size = 1+1 + (BUF_LEN*2)+ 1+1 # header + ID + data + end + checksum
+last_block_id=None
+
+
+
+# HARDWARE PARAMS
+
+SENSOR_DIST = (6.6*25.4)/1000 # meters 
 
 # filter definitions for improving hardware signal
-fs = I2S_SAMPLE_RATE
+fs = SAMPLE_RATE
 low = 70
 high = 19000
 # b,a = signal.butter(4, Wn=[low, high], btype='bandpass', fs=fs, output='ba')
@@ -46,19 +54,16 @@ GREEN = Fore.GREEN + Style.DIM
 RED = Fore.RED + Style.BRIGHT
 RESET = Style.RESET_ALL
 
-ser = serial.Serial('COM3', 921600, timeout=1)
-time.sleep(.5)
-sample_count = 1024
-packet_size = sample_count * 2 # 2 bytes per sample
+
 
 # logger = connect_python.get_logger(__name__)
 
 
 
-def voltage_extractor(adc_signal):
-    """ does the opposite of to_255; takes a signal from esp32 and makes it legible voltage value"""
-    vref = 3.3 # volts
-    return (adc_signal/4095) *vref # 12 bit resolution
+# def voltage_extractor(adc_signal):
+#     """ does the opposite of to_255; takes a signal from esp32 and makes it a legible voltage value"""
+#     vref = 3.3 # volts
+#     return (adc_signal/4095) *vref # 12 bit resolution
 
 
 def read_packet(duration_sec):
@@ -66,12 +71,16 @@ def read_packet(duration_sec):
     Makes sure packet is synchronized, well-formed, and not corrupt
     then returns this packet's data for processing.
     """
+    last_block_id=None
 
-    total_samples = I2S_SAMPLE_RATE * duration_sec
-    all_data= []
+    piezo1_total = np.array([])
+    piezo2_total = np.array([])
+
+    total_samples = SAMPLE_RATE * duration_sec *2
+    all_data= 0
     print(f"Recording for {duration_sec} seconds")
 
-    while len(all_data) < total_samples:
+    while all_data < total_samples:
         
         b = ser.read(1)
         # print("reading")
@@ -79,38 +88,261 @@ def read_packet(duration_sec):
 
         if b == START_byte1:
             # print("passed first check")
-            if ser.read(1)==START_byte2:
-                # print("passed second check")
-                raw_payload = ser.read(packet_size)
+            # print("passed second check")
+            packet = ser.read(packet_size-1)
 
-                # fast conversion and bit masking 4-bit channel ID
-                chunk = np.frombuffer(raw_payload, dtype=np.uint16) & 0x0FFF
-                all_data.extend(chunk)
+            if len(packet) <(packet_size-1):
+                continue
+            
+            block_id = packet[0]
+            raw_data = packet[1:-2] # exclude block ID, endbyte, and checksum
+            received_checksum = packet[-1]
+
+            # verify checksum
+            calc_check = 0
+            for b in packet[1:-1]:
+                calc_check ^= b
+            if calc_check!=received_checksum:
+                print(f"CHECKSUM MISMATCH! BLOCK ID {block_id}")
+                continue
+
+            if last_block_id is not None:
+                diff = (block_id-last_block_id)%256
+                if diff>1:
+                    # we must have dropped a number!!
+                    print(f"Dropped {diff-1} blocks!")
+                last_block_id = block_id
+            
+
+            # fast conversion and bit masking 4-bit channel ID
+            chunk = np.frombuffer(raw_data, dtype=np.uint8).reshape(-1,2) # reshape 50,2
+            piezo1 = chunk[:,0]
+            piezo2 = chunk[:,1]
+
+            piezo1_total = np.append(piezo1_total, piezo1)
+            piezo2_total = np.append(piezo2_total, piezo2)
+
+            # print(len(piezo1))
+            all_data += len(piezo1)*2
     
-    return np.array(all_data)
-data = read_packet(10)
-np.save('hydrophone_test_run.npy', data)
+    return piezo1_total, piezo2_total
+
+
+
+a_data, b_data = read_packet(5)
+# print(f"here is a_data: {a_data}")
+# print(f"here is b_data: {b_data}")
+
+np.save('dual_test_a.npy', a_data)
+np.save('dual_test_b.npy', b_data)
 ser.close()
 print("serial should be closed!")
 
 
 time.sleep(.01)
 
-data = np.load('hydrophone_test_run.npy')
-data = data-np.mean(data) # subtracting the offset should make the math cleaner?
+a_data = np.load('dual_test_a.npy')
+b_data = np.load('dual_test_b.npy')
 
-fs = I2S_SAMPLE_RATE
-time = np.linspace(0, len(data)/fs, num=len(data))
+# print(f"here is a_data: {a_data}")
+# print(f"here is b_data: {b_data}")
 
-window_size = 500
 
-moving_avg = np.convolve(data, np.ones(window_size)/window_size, mode='same')
-filtered_data = signal.filtfilt(b,a,data)
+# trying a filter ###########################
+
+# fs = SAMPLE_RATE
+time = np.linspace(0, len(a_data)/fs, num=len(b_data))
+
+# window_size = 500
+
+# moving_avg = np.convolve(data, np.ones(window_size)/window_size, mode='same')
+# filtered_data = signal.filtfilt(b,a,data)
+# ########################################### ^^^ didn't work well so not currently in use
+
+def align_signals(p1, p2, sampling_rate = SAMPLE_RATE, conv_delay = 2.5e-6):
+    """ aligns the signals given a 2.5 microsecond conversion delay """
+    ts = 1.0 / sampling_rate # gives us the sampling interval
+    # find the shift factor we need
+    alpha = conv_delay / ts 
+
+    # basic linear interpolation to "guess" where the signal was
+    p2_aligned = np.zeros_like(p2)
+    # we need to start with the first one because we depend on prev samples
+    p2_aligned[1:] = (1-alpha) * p2[1:] + alpha*p2[:-1]
+
+    # handle first sample, which we'll just copy
+    p2_aligned[0] = p2[0]
+
+    # maybe we should consider sinc sampling later if 
+    # we want to end up with a more precise result - 
+        # essentially we upsample our data, shift it, then down sample again 
+        # to put it in position well.
+    return p1, p2_aligned
+
+
+def peak_localization(filt_sig):
+    """ return location of peaks given filtered signal """
+    segment_length = SAMPLE_RATE # samples per length
+
+    peaks = np.array([np.max(np.abs(filt_sig[i:i+segment_length])) for i 
+                    in range(0,len(filt_sig),segment_length)])
+    
+
+
+    max_peak = np.max(peaks)
+    max_peak_locations = np.where(np.abs(filt_sig)>=max_peak)
+    avg_peak = np.average(peaks)
+    print(f"average peak is {avg_peak}")
+    general_peak_locations = np.where(filt_sig>avg_peak)
+    general_peak_values = np.array([filt_sig[i] for i in general_peak_locations[0]])
+
+    true_peak_locations,_ = signal.find_peaks(np.abs(general_peak_values), height=0,distance=1)
+
+    # print(f"these are the max peaks: {max_peak_locations}")
+    # print(f" at values {[filt_sig[i] for i in max_peak_locations]}")
+    # print(f"there are {len(true_peak_locations)} peaks calculated")
+
+    # return [general_peak_locations[0][i] for i in true_peak_locations]
+    # return max_peak_locations[0]
+    return general_peak_locations[0]
+
+
+
+# code for correlation!
+
+def calculate_localization(sig_a, sig_b, fs = SAMPLE_RATE, v_wood=4950):  #v_wood based on trials
+    """ 
+    uses input from both signals to calculate the time difference and thus return localization (1D) 
+
+    sig_a is coming from the left (should mark)
+    sig_b is coming from the right 
+    fs is sampling freq
+    v-wood is the sound in the wood (m/s) - we should calibrate this
+    """
+
+    # steps
+
+    # 1 pre-processing: remove DC offset and any fuzz that we can
+    # data = savgol_filter(data-np.mean(data), window_length=50, polyorder=3)
+
+    sig_a_smooth = sig_a# gaussian_filter1d(sig_a-np.mean(sig_a),sigma=2)
+    sig_b_smooth = sig_b#gaussian_filter1d(sig_b-np.mean(sig_b),sigma=2)
+
+    # new_sig = gaussian_filter1d(sig_a-np.mean(sig_a),sigma=1.5, order=1)
+    # plt.plot(list(range(len(new_sig))), new_sig)
+    # plt.show()
+    # segment_length = 1000 # samples per length
+
+    # peaks = np.array([np.max(np.abs(sig_a_smooth[i:i+segment_length])) for i 
+    #                 in range(0,len(sig_a_smooth),segment_length)])
+
+    # avg_peak = np.average(peaks)
+    # indices_a = np.where(np.abs(sig_a_smooth)>avg_peak)[0]
+
+    indices_a = peak_localization(sig_a_smooth)
+    if indices_a is None or len(indices_a)==0:
+        # no tap detected?
+        return None,None
+    print(f"indices are {indices_a}")
+    start_idx = max(0, indices_a[0]-100) # include some pre-trigger
+    end_idx = min(len(sig_a_smooth), indices_a[0]+10) # short window?
+    # now we want ot get the windows
+    a_win = sig_a_smooth[start_idx:end_idx]
+    b_win = sig_b_smooth[start_idx:end_idx]
+    # print(f"start index {start_idx}")
+    # print(f"end index {end_idx}")
+    plt.plot(list(range(len(a_win))), a_win)
+    plt.plot(list(range(len(a_win))), b_win)
+    plt.show()
+
+
+    # print(f"len sig_a {len(sig_a)}")
+    # print(f"len sig_b {len(sig_b)}")
+
+    # print(len(a_win))
+    # print(len(b_win))
+    # 2 do cross correlation (extract initial time stamp (or just always send with the same start!))
+    a_der = np.gradient(a_win)
+    b_der = np.gradient(b_win)
+
+    # in 'full' mode will return array of length len(a) + len(b) - 1
+    corr = signal.correlate(a_der, b_der, mode='full')
+
+    # 3 find the peak, 'zero lag' is at the center of full correlation array 
+        #   (do we want the peak, or the tiny drop before it?)
+    
+    center = len(a_win) -1 
+    k_int = np.argmax(np.abs(corr))
+    print(f"k_int location is {k_int}")
+
+    # 4 is sub-sample parabolic interpolation necessary? - make sure to check boundaries for edge conditions
+
+    # TODO - ignore this for now!
+
+    # 5 convert the peak index into a time delay between both signals
+        #   make the distance relative to the center of the wood piece
+
+    peak_time_offset = k_int - center
+    dt = (peak_time_offset/fs) - 2.5e-6 
+    print(f"dt is {dt:.15f}")
+    # d1 = ((SENSOR_DIST - dt*v_wood)/2.0)*100 # distance to sensor on right (cm)
+    d1 = ((dt*v_wood)/2.0)*100 # distance to sensor on right (cm)
+
+
+    return d1, corr
+
+    # 6 now convert to distance from 
+
+
+# calc = calculate_localization(data, data)
+# print(f"distance is {calc[0]} cm")
+
+
+
+
 
 # doing a moving average makes us unable to see scratches
 
 # plot
-plt.plot(time,data)
+# a_data, b_data = align_signals(a_data,b_data)
+
+def apply_notch(data, notch_freq=60.0, quality_factor=30.0, fs=SAMPLE_RATE):
+    # Design the notch filter
+    b, a = signal.iirnotch(notch_freq, quality_factor, fs)
+    # Apply it
+    filtered_data = signal.filtfilt(b, a, data)
+    return filtered_data
+
+
+a_data= a_data-np.mean(a_data)# gaussian_filter1d(sig_a-np.mean(sig_a),sigma=2)
+b_data= b_data-np.mean(b_data)
+a_data = apply_notch(a_data)
+b_data = apply_notch(b_data)
+a_data = apply_notch(a_data, notch_freq=58)
+b_data = apply_notch(b_data, notch_freq=58)
+a_data = medfilt(a_data, kernel_size=3)
+b_data = medfilt(b_data, kernel_size=3)
+# a_data = gaussian_filter1d(a_data,sigma=1.5, order=1)
+# b_data = gaussian_filter1d(b_data,sigma=1.5, order=1)
+
+
+
+# def remove_glitches(data, max_diff=50)
+
+print(peak_localization(a_data))
+local_data = calculate_localization(a_data,b_data)
+print(f"about {local_data[0]}cm from center")
+plt.plot(list(range(len(local_data[1]))), local_data[1], label="correlation")
+plt.show()
+plt.plot(time,a_data, label = 'a_data')
+plt.plot(time,b_data, label = 'b_data')
+
+plt.legend()
+plt.xlabel('Time [s]')
+plt.ylabel('Amplitude')
+plt.title('a_data and b_data')
+
+
 # plt.plot(time, filtered_data)
 # plt.plot(time, data-moving_avg)
 plt.show()
