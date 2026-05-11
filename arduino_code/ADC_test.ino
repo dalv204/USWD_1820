@@ -49,12 +49,14 @@ void IRAM_ATTR onTimer(){
   timer_triggered=true;
 }
 
-const int SAMPLING_FREQ = 80000;
+const int SAMPLING_FREQ = 40000;
 uint8_t sample_id = 0; // rolling counter for id
 const uint16_t BUF_LEN = 50; // 50 pairs
 uint8_t data_buffer[BUF_LEN*2]; //100 bytes total
 uint16_t buffer_index = 0;
 uint8_t block_id=0;
+
+unsigned long last_block_time = 0;
 
 
 void setup(){
@@ -118,21 +120,28 @@ void loop() {
     data_buffer[buffer_index++] = (uint8_t)read_channel(1); // piezzo 2 should be 0V
 
     if (buffer_index >= (BUF_LEN*2)){
+      unsigned long end_micros = micros();
+
+      unsigned long total_duration = end_micros - last_block_time;
+      last_block_time = end_micros
+
+      Serial.print("Block duration (us)");
+      Serial.println(total_duration);
       uint8_t checksum=0;
       buffer_index=0;
 
-      for (int i=0; i<(BUF_LEN*2); i++){
-        checksum^= data_buffer[i];
-      }
-      checksum^= 0x00;
+      // for (int i=0; i<(BUF_LEN*2); i++){
+      //   checksum^= data_buffer[i];
+      // }
+      // checksum^= 0x00;
 
-      Serial.write(0xAA); // start byte
-      Serial.write(block_id);
-      Serial.write(data_buffer, BUF_LEN*2);
-      Serial.write(0x00); // end byte
-      Serial.write(checksum);
+      // Serial.write(0xAA); // start byte
+      // Serial.write(block_id);
+      // Serial.write(data_buffer, BUF_LEN*2);
+      // Serial.write(0x00); // end byte
+      // Serial.write(checksum);
 
-      block_id++;
+      // block_id++;
     }
 
     // Serial.write(sample_id);
