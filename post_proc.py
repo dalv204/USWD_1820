@@ -9,6 +9,7 @@ from scipy.io.wavfile import read
 threshold = 2200
 succession_threshold = 170
 window_size = 1000
+window_shift = window_size //2 # IMPORTANT: increase shift if picking up too many peaks
 
 ################## RAW DATA ##################
 hard_taps_arr = np.array(np.load("tests/hard_taps_noisy.npy"))
@@ -16,11 +17,11 @@ knocks_arr = np.load("tests/knocks_noisy.npy")
 mary = np.load("raw_piezo_waveforms/mary.npy")
 succession = np.load("raw_piezo_waveforms/dual_test_a.npy")
 
-samples = mary
-name = "mary"
+# samples = mary
+# name = "mary"
 
-# samples = succession
-# name = "succession"
+samples = succession
+name = "succession"
 
 # samples = knocks_arr
 # name = "knocks"
@@ -104,7 +105,7 @@ while i < N:
             if idx >= 0 and idx < N: #out of bounds check
                 buf.append(samples[idx])
         windows.append(buf)
-        i += window_size // 8 # may want to tune this window idx shift
+        i += window_shift # may want to tune this window idx shift
     else:
         i += 1
         # windows.extend([0] * 10)
@@ -154,7 +155,7 @@ for timestamp, num_taps in ts_tap.items():
     # print(timestamp, end_timestamp)
     audio_out[timestamp: end_timestamp] = note[:end_timestamp - timestamp]
 
-# wav_write(audio_out, fs, f'audio_out/{name}_piano_out.wav')
+wav_write(audio_out, fs, f'audio_out/{name}_piano_out.wav')
 
 ################## FIND FREQ PEAKS OVER ALL WINDOWS ##################
 peaks = []
