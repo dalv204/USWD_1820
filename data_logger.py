@@ -239,7 +239,7 @@ def onset_energy(sig):
 
 
 
-def calculate_localization(sig_a, sig_b, fs = SAMPLE_RATE, v_wood=2000):  #v_wood based on trials
+def calculate_localization(sig_a, sig_b, fs = SAMPLE_RATE, v_wood=5000):  #v_wood based on trials
     """ 
     uses input from both signals to calculate the time difference and thus return localization (1D) 
 
@@ -250,6 +250,7 @@ def calculate_localization(sig_a, sig_b, fs = SAMPLE_RATE, v_wood=2000):  #v_woo
     """
 
     max_distance_cm = 14 # cm
+    fs = fs*5 # try upsampling to reduce sensitivity
 
     # 1 pre-processing: remove DC offset and any fuzz that we can
     # data = savgol_filter(data-np.mean(data), window_length=50, polyorder=3)
@@ -269,7 +270,7 @@ def calculate_localization(sig_a, sig_b, fs = SAMPLE_RATE, v_wood=2000):  #v_woo
     if indices_a is None or len(indices_a)==0:
         # no tap detected?
         return None,None
-    start_idx_a = max(0, indices_a[0]-50) # include some pre-trigger
+    start_idx_a = float('inf')#max(0, indices_a[0]-100) # include some pre-trigger
     start_idx_b = max(0, indices_b[0]-50)
     print(f"start_idx {start_idx_a=}")
     print(f"start_idxb {start_idx_b=}")
@@ -278,11 +279,11 @@ def calculate_localization(sig_a, sig_b, fs = SAMPLE_RATE, v_wood=2000):  #v_woo
     start_idx = min(start_idx_a, start_idx_b)
     if start_idx==start_idx_a:
         # then we want to use b as the end
-        end_idx = min(len(sig_a_smooth), start_idx_b+50-20) # +100 adds what we subtracted earlier, leaving it the original-20
+        end_idx = min(len(sig_a_smooth), start_idx_a+100+50) # +100 adds what we subtracted earlier, leaving it the original-20
 
     else:
         # use a as the end
-        end_idx = min(len(sig_a_smooth), start_idx_a+50-20)
+        end_idx = min(len(sig_a_smooth), start_idx_b+100+50)
 
     # now we want ot get the windows
     a_win = gaussian_filter1d(sig_a_smooth[start_idx:end_idx], sigma=1)
@@ -300,7 +301,7 @@ def calculate_localization(sig_a, sig_b, fs = SAMPLE_RATE, v_wood=2000):  #v_woo
     ea = ea / (np.max(ea) + 1e-9)
     eb = eb / (np.max(ea) + 1e-9)
 
-    corr = signal.correlate(ea, eb, mode='full')
+    corr = signal.correlate(np.abs(a_win), np.abs(b_win), mode='full')
 
     peak_indices = signal.find_peaks(corr,distance=1)[0]
     if len(peak_indices)==0:
@@ -315,7 +316,7 @@ def calculate_localization(sig_a, sig_b, fs = SAMPLE_RATE, v_wood=2000):  #v_woo
         # print(f"{center=}")
         # print(f"{peak_pos-center=}")
         # print(f"{peak_pos=}")
-        dt = (lag/fs) - 2.5e-6
+        dt = (lag/fs) - 2.5e-6 
         # print(f'{(lag/fs)}')
         
         d1 = ((dt*v_wood)/2.0) * 100
@@ -331,7 +332,7 @@ def calculate_localization(sig_a, sig_b, fs = SAMPLE_RATE, v_wood=2000):  #v_woo
             'dt':dt
         })
 
-    valid_candidates = [c for c in candidates if abs(c['d1']) <=max_distance_cm]
+    valid_candidates = [c for c in candidates if abs(c['d1']) <=max_distance_cm*2]
     if valid_candidates:
         best_few = sorted(valid_candidates, key=lambda c: abs(c['amp']), reverse=True)
         print(f"{len(best_few)=}")
@@ -403,7 +404,7 @@ def calculate_localization(sig_a, sig_b, fs = SAMPLE_RATE, v_wood=2000):  #v_woo
 
 
 
-    return constrained_d1, corr
+    return constrained_d1+12, corr
 
     # 6 now convert to distance from 
 
@@ -436,6 +437,8 @@ a_data = apply_notch(a_data, notch_freq=58)
 b_data = apply_notch(b_data, notch_freq=58)
 a_data = medfilt(a_data, kernel_size=3)
 b_data = medfilt(b_data, kernel_size=3)
+
+a_data, b_data = align_signals(a_data, b_data)
 
 
 # a_data = gaussian_filter1d(a_data,sigma=1.5, order=1)
