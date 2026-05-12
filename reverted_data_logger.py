@@ -17,6 +17,8 @@ from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import QApplication
 import pyqtgraph as pg
 
+import winsound
+
 
 ################## ATTENTION #####################
 # THIS IS THE REVERTED FILE FOR JUST GATHERING 
@@ -139,23 +141,135 @@ curve = plot.plot(pen=pg.mkPen("y", width=1))
 
 x = np.linspace(-live_graph_duration, 0, N, dtype=np.float32)
 
+last_peak_sample = -999999
+global_index=0
+
+tap_times = []
+sequence_timeout = 0.3 # try .5 seconds for now
+
 
 def update():
+
+    NOTE_MAP = {
+        1: 261.63, #C4
+        2: 293.66, # D4
+        3: 329.63, #E4
+        4: 349.23, #F4
+        5: 392.00, #G4
+        6: 523.25, #C5
+        7: 783.99, # G5
+    }
+
+    # DFT_WINDOW_SAMPLES = 2048 # about 50ms
 
     # this updates the live graph, but we still want to be able to view 
     # the data after we put it here, and we want to be able to run an fft
     # then detect different kinds of taps
     global buffer 
+    global global_index
+    global last_peak_sample
     chunk = read_packet_chunk().astype(np.float32)
+    global_index +=len(chunk)
+
     chunk -=np.mean(chunk)
     buffer = np.roll(buffer, -len(chunk))
     buffer[-len(chunk):] = chunk
     filtered = apply_notch(apply_notch(buffer),58)
+    energy = filtered**2 # see different ways to quickly find the data
+    smooth = np.convolve(
+        energy,np.ones(200)/200,
+        mode='same'
+    )
+
+
+
+    recent = smooth[-4000:] # make this dependent on freq?
+    THRESHOLD = np.average(np.abs(recent))+300
+
+    peaks, props = signal.find_peaks(
+        recent-np.average(recent),
+        height=THRESHOLD,
+        distance = 0.06 * I2S_SAMPLE_RATE # give it 0.06 seconds per knock
+    )
+    # print(f"{peaks=}")
+    classification=None
+    for p in peaks:
+        absolute_peak = global_index-len(recent)+p
+        if absolute_peak - last_peak_sample > 3000:
+            print("Tap detected!")
+            current_time = time.time()
+            tap_times.append(current_time)
+            last_peak_sample = absolute_peak
+
+            # make a buffer index 
+            buffer_index = N-len(recent)+p
+            start = buffer_index-300
+            end = buffer_index+1700
+            tap_window = buffer[start:end] # need to make sure ths works within the circular buffer
+
+            windowed_result = tap_window*np.hanning(len(tap_window))
+            fft = np.fft.rfft(windowed_result)
+            magnitude = np.abs(fft) # grab the magnitude of the fft
+            freqs = np.fft.rfftfreq(len(windowed_result), d=1/fs)
+
+            interest_region = freqs>100
+            freqs = freqs[interest_region] # try to find specific ones?
+
+
+            # let's also try to normalize the data?
+            magnitude = (magnitude / np.sum(magnitude))[interest_region]
+
+            # freqs alone does nothing!! :((((((((
+            # we need to pair it with magnitude?
+            good_info = np.sum(freqs*magnitude)/np.sum(magnitude)
+
+            # if below 7000, likely a knock?
+
+            
+            section = np.abs(tap_window)
+            width = np.sum(section>np.average(np.abs(buffer)+100)) # width was not too helpful because it depends on strength
+
+            # double knock also has similar freq content, but width is is larger!
+            classification = None
+            if good_info<5000:
+                # probably a knock
+                if width < 250:
+                    # probably single knock
+                    classification="single_knock"
+                else:
+                    classification="double_knock"
+            else:
+
+                classification="tap"
+
+            print(f"{good_info=}")
+
+            print(f"{width=}")
+
+    current_time = time.time()
+    if classification is not None:
+        print(f"{classification=}")
+    if classification=="single_knock":
+        winsound.Beep(int(NOTE_MAP[6]), 200)
+    elif classification=="double_knock":
+        # do special high
+        winsound.Beep(int(NOTE_MAP[7]), 200)
+
+    else:
+        if len(tap_times)>0:
+            dt = current_time -tap_times[-1]
+            if dt>sequence_timeout:
+                num_taps = len(tap_times)
+                if num_taps in NOTE_MAP:
+                    freq = NOTE_MAP[num_taps]
+                    # print(f"play {freq}")
+                    winsound.Beep(int(freq), 200)
+                tap_times.clear()
     
 
 
     # now actually plot the data
-    curve.setData(x,buffer)
+    curve.setData(x,smooth)
 
 
 
@@ -166,52 +280,52 @@ QApplication.instance().exec_()
 
 
 
-data = read_packet_total(5)
-data = data-np.mean(data) # subtracting the offset should make the math cleaner?
-np.save('swipe.npy', data)
-ser.close()
+# data = read_packet_total(5)
+# data = data-np.mean(data) # subtracting the offset should make the math cleaner?
+# np.save('swipe.npy', data)
+# ser.close()
 
 
 
-print("serial should be closed!")
+# print("serial should be closed!")
 
 
-time.sleep(.01)
+# time.sleep(.01)
 
-data = np.load('mary_2.npy')
+# data = np.load('mary_2.npy')
 
-fs = I2S_SAMPLE_RATE
-time = np.linspace(0, len(data)/fs, num=len(data))
+# fs = I2S_SAMPLE_RATE
+# time = np.linspace(0, len(data)/fs, num=len(data))
 
-window_size = 500
+# window_size = 500
 
-moving_avg = np.convolve(data, np.ones(window_size)/window_size, mode='same')
-# filtered_data = signal.filtfilt(b,a,data)
-data = apply_notch(data)
-data = apply_notch(data, 58)
+# moving_avg = np.convolve(data, np.ones(window_size)/window_size, mode='same')
+# # filtered_data = signal.filtfilt(b,a,data)
+# data = apply_notch(data)
+# data = apply_notch(data, 58)
 
-energy = data**2 # see different ways to quickly find the data
-smooth = np.convolve(
-    energy,np.ones(200)/200,
-    mode='same'
-)
+# energy = data**2 # see different ways to quickly find the data
+# smooth = np.convolve(
+#     energy,np.ones(200)/200,
+#     mode='same'
+# )
 
-peaks, props = signal.find_peaks(
-    smooth,
-    height=np.average(smooth),
-    distance = 0.06 * I2S_SAMPLE_RATE # give it 0.06 seconds per knock
-)
+# peaks, props = signal.find_peaks(
+#     smooth,
+#     height=np.average(smooth),
+#     distance = 0.06 * I2S_SAMPLE_RATE # give it 0.06 seconds per knock
+# )
 
-print(f"{peaks=}")
-print(f"{len(peaks)=}")
+# print(f"{peaks=}")
+# print(f"{len(peaks)=}")
 
-plt.plot(time,smooth)
-plt.show()
+# plt.plot(time,smooth)
+# plt.show()
 
-# doing a moving average makes us unable to see scratches
+# # doing a moving average makes us unable to see scratches
 
-# plot
-plt.plot(time,data)
-# plt.plot(time, filtered_data)
-# plt.plot(time, data-moving_avg)
-plt.show()
+# # plot
+# plt.plot(time,data)
+# # plt.plot(time, filtered_data)
+# # plt.plot(time, data-moving_avg)
+# plt.show()
