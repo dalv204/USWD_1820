@@ -146,6 +146,11 @@ global_index=0
 
 tap_times = []
 sequence_timeout = 0.3 # try .5 seconds for now
+max_signal_seen = 0
+
+classifier_tools = {"calibrated":False, "tap":(0,0),"knock":(0,0), "double_knock":(0,0) }
+peak_counter = 0
+# first index is the centroid position, second is the width
 
 
 def update():
@@ -168,6 +173,9 @@ def update():
     global buffer 
     global global_index
     global last_peak_sample
+    global max_signal_seen
+    global classifier_tools
+    global peak_counter
     chunk = read_packet_chunk().astype(np.float32)
     global_index +=len(chunk)
 
@@ -184,19 +192,27 @@ def update():
 
 
     recent = smooth[-4000:] # make this dependent on freq?
-    THRESHOLD = np.average(np.abs(recent))+300
+    THRESHOLD = np.average(np.abs(recent))+(max_signal_seen*0.25)
 
     peaks, props = signal.find_peaks(
         recent-np.average(recent),
         height=THRESHOLD,
         distance = 0.06 * I2S_SAMPLE_RATE # give it 0.06 seconds per knock
     )
+    if len(peaks)!=0:
+        max_signal_seen = np.max(recent[peaks[0]])
+
     # print(f"{peaks=}")
     classification=None
+
+    if not classifier_tools["calibrated"]:
+        print("FIRST 9 knocks are classifying!! 3 taps, 3 knocks, 3 double knocks")
     for p in peaks:
         absolute_peak = global_index-len(recent)+p
         if absolute_peak - last_peak_sample > 3000:
             print("Tap detected!")
+            peak_counter+=1
+
             current_time = time.time()
             tap_times.append(current_time)
             last_peak_sample = absolute_peak
@@ -229,18 +245,32 @@ def update():
             section = np.abs(tap_window)
             width = np.sum(section>np.average(np.abs(buffer)+100)) # width was not too helpful because it depends on strength
 
+            if not classifier_tools["calibrated"]:
+                # then we are storing calibrations rn
+                if peak_counter<3:
+                    tap_data = classifier_tools["knock"]
+                    classifier_tools["tap"] = tap_data[0]+good_info, tap_data[1]+width
+                elif peak_counter<6:
+                    knock_data = classifier_tools["knock"]
+                    classifier_tools["knock"] = max(knock_data[0],good_info), knock_data[1]+width
+                elif peak_counter<9:
+                    knock2_data = classifier_tools["double_knock"]
+                    classifier_tools["double_knock"] = knock2_data[0]+good_info, min(knock2_data[1],width)
+                else:
+                    classifier_tools["calibrated"]=True
             # double knock also has similar freq content, but width is is larger!
             classification = None
-            if good_info<5000:
-                # probably a knock
-                if width < 250:
-                    # probably single knock
-                    classification="single_knock"
+            if classifier_tools["calibrated"]:
+                if good_info<classifier_tools["knock"][0]:
+                    # probably a knock
+                    if width < classifier_tools["double_knock"][1]:
+                        # probably single knock
+                        classification="single_knock"
+                    else:
+                        classification="double_knock"
                 else:
-                    classification="double_knock"
-            else:
 
-                classification="tap"
+                    classification="tap"
 
             print(f"{good_info=}")
 
